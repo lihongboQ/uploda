@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>文件上传示例</title>
+</head>
+
+<body>
+  <!-- 文件选择表单 -->
+  <input type="file" id="fileInput" multiple>
+  <button onclick="upload()">上传文件</button>
+
+  <!-- 进度显示 -->
+  <div id="progress" style="width: 300px; height: 20px; background: #eee; margin-top: 10px;">
+    <div id="progressBar" style="width: 0%; height: 100%; background: #4CAF50;"></div>
+  </div>
+  <p id="status"></p>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/spark-md5/3.0.2/spark-md5.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/axios@1.6.7/dist/axios.min.js"></script>
+  <script>
+    const CHUNK_SIZE = 2 * 1024 * 1024; // 分片大小2MB
+
+    async function upload() {
+      const file = document.getElementById('fileInput').files[0];
+      if (!file) return alert('请选择文件');
+
+      // 计算文件唯一hash（用于断点续传）
+      const fileHash = await calculateFileHash(file);
+
+      // 获取已上传分片（实现断点续传）
+      const { data: existChunks } = await axios.get('http://localhost:3000/api/check', {
+        params: { hash: fileHash }
+      });
+
+      // 创建分片数组
+      const chunks = createFileChunks(file, CHUNK_SIZE);
+      const requests = chunks.map((chunk, index) => {
+        // 跳过已上传分片
+        console.log("🚀 ~ requests ~ existChunks:", existChunks)
+        if (existChunks.data.includes(index.toString())) return null;
+
+        const formData = new FormData();
+        formData.append('file', chunk.file);
+        formData.append('hash', fileHash);
+        formData.append('index', index);
+        formData.append('total', chunks.length);
+
+        return axios.post('http://localhost:3000/api/upload', formData, {
+          onUploadProgress: createProgressHandler(index, chunks.length)
+        });
+      }).filter(Boolean);
+        
+
+      // 并行上传（可控制并发数）
+      await Promise.all(requests);
+
+      // 通知合并文件
+      await axios.post('/api/merge', {
+        hash: fileHash,
+        filename: file.name,
+        total: chunks.length
+      });
+
+      alert('上传完成');
+    }
+
+    // 创建文件分片
+    function createFileChunks(file, chunkSize) {
+      const chunks = [];
+      let cur = 0;
+      while (cur < file.size) {
+        chunks.push({
+          file: file.slice(cur, cur + chunkSize),
+          index: chunks.length
+        });
+        cur += chunkSize;
+      }
+      return chunks;
+    }
+
+    // 计算文件hash
+    function calculateFileHash(file) {
+      return new Promise(resolve => {
+        const spark = new SparkMD5.ArrayBuffer();
+        const reader = new FileReader();
+        const chunkSize = 2 * 1024 * 1024;
+        let cur = 0;
+
+        reader.onload = e => {
+          spark.append(e.target.result);
+          cur += chunkSize;
+          if (cur >= file.size) {
+            resolve(spark.end());
+            return;
+          }
+          loadNext();
+        };
+
+        function loadNext() {
+          const chunk = file.slice(cur, cur + chunkSize);
+          reader.readAsArrayBuffer(chunk);
+        }
+
+        loadNext();
+      });
+    }
+
+    // 进度处理函数
+    function createProgressHandler(index, total) {
+      const progressBar = document.getElementById('progress');
+      return progress => {
+        const percent = Math.round((progress.loaded / progress.total) * 100);
+        progressBar.innerHTML = `分片 ${index + 1}/${total}：${percent}%<br>`;
+      };
+    }
+  </script>
+</body>
+
+</html>
